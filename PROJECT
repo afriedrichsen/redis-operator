@@ -1,0 +1,9 @@
+domain: friedrichsen.private
+layout:
+- go.kubebuilder.io/v3
+plugins:
+  manifests.sdk.operatorframework.io/v2: {}
+  scorecard.sdk.operatorframework.io/v2: {}
+projectName: redis-operator
+repo: github.com/afriedrichsen/redis-operator
+version: "3"
