@@ -49,7 +49,7 @@ jobs:
             exit 1
           fi
       - name: Build container image
-        run: make docker-build IMG=test/helm-controller:latest
+        run: make docker-build IMG=test/redis-controller:latest
         env:
           KUBEBUILDER_ASSETS: ${{ github.workspace }}/kubebuilder/bin
       - name: Load test image
@@ -65,13 +65,12 @@ jobs:
       #       echo -e "${RESULT}\n\ndoes not equal\n\n${EXPECTED}"
       #       exit 1
       #     fi
-      # - name: Deploy controllers
-      #   run: |
-      #     make dev-deploy IMG=test/helm-controller:latest
-      #     kubectl -n helm-system rollout status deploy/source-controller --timeout=1m
-      #     kubectl -n helm-system rollout status deploy/helm-controller --timeout=1m
-      #   env:
-      #     KUBEBUILDER_ASSETS: ${{ github.workspace }}/kubebuilder/bin
+      - name: Deploy controllers
+        run: |
+          make dev-deploy IMG=test/redis-controller:latest
+          kubectl -n helm-system rollout status deploy/redis-controller --timeout=1m
+        env:
+          KUBEBUILDER_ASSETS: ${{ github.workspace }}/kubebuilder/bin
       # - name: Install sources
       #   run: |
       #     kubectl -n helm-system apply -f config/testdata/sources

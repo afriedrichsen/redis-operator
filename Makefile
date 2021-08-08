@@ -114,6 +114,20 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
 	$(KUSTOMIZE) build config/default | kubectl apply -f -
 
+# Deploy controller dev image in the configured Kubernetes cluster in ~/.kube/config
+dev-deploy: manifests kustomize
+	mkdir -p config/dev && cp config/default/* config/dev
+	cd config/dev && $(KUSTOMIZE) edit set image fluxcd/helm-controller=${IMG}
+	$(KUSTOMIZE) build config/dev | kubectl apply -f -
+	rm -rf config/dev
+
+# Delete dev deployment and CRDs
+dev-cleanup: manifests kustomize
+	mkdir -p config/dev && cp config/default/* config/dev
+	cd config/dev && $(KUSTOMIZE) edit set image fluxcd/helm-controller=${IMG}
+	$(KUSTOMIZE) build config/dev | kubectl delete -f -
+	rm -rf config/dev
+
 undeploy: ## Undeploy controller from the K8s cluster specified in ~/.kube/config.
 	$(KUSTOMIZE) build config/default | kubectl delete -f -
 
