@@ -68,7 +68,7 @@ jobs:
       - name: Deploy controllers
         run: |
           make dev-deploy IMG=test/redis-controller:latest
-          kubectl -n helm-system rollout status deploy/redis-controller --timeout=1m
+          kubectl -n redis-system rollout status deploy/redis-controller --timeout=1m
         env:
           KUBEBUILDER_ASSETS: ${{ github.workspace }}/kubebuilder/bin
       # - name: Install sources
