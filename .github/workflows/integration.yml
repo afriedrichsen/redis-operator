@@ -1,0 +1,539 @@
+name: integration
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "feature/**"
+jobs:
+  kind:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Restore Go cache
+        uses: actions/cache@v1
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+      - name: Setup Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: 1.16.x
+      - name: Setup Kubernetes
+        uses: engineerd/setup-kind@v0.5.0
+        with:
+          version: v0.11.1
+          image: kindest/node:v1.21.1@sha256:69860bda5563ac81e3c0057d654b5253219618a22ec3a346306239bba8cfa1a6
+      - name: Setup Helm
+        uses: fluxcd/pkg/actions/helm@main
+      - name: Setup Kustomize
+        uses: fluxcd/pkg/actions/kustomize@main
+      - name: Setup Kubebuilder
+        uses: fluxcd/pkg/actions/kubebuilder@main
+      - name: Setup Kubectl
+        uses: fluxcd/pkg/actions/kubectl@main
+      - name: Run tests
+        run: make test
+        env:
+          KUBEBUILDER_ASSETS: ${{ github.workspace }}/kubebuilder/bin
+      - name: Check if working tree is dirty
+        run: |
+          if [[ $(git diff --stat) != '' ]]; then
+            git --no-pager diff
+            echo 'run make test and commit changes'
+            exit 1
+          fi
+      - name: Build container image
+        run: make docker-build IMG=test/helm-controller:latest
+        env:
+          KUBEBUILDER_ASSETS: ${{ github.workspace }}/kubebuilder/bin
+      - name: Load test image
+        run: kind load docker-image test/helm-controller:latest
+      - name: Install CRDs
+        run: make install
+      # - name: Run default status test
+      #   run: |
+      #     kubectl apply -f config/testdata/status-defaults
+      #     RESULT=$(kubectl get helmrelease status-defaults -o go-template={{.status}})
+      #     EXPECTED='map[observedGeneration:-1]'
+      #     if [ "${RESULT}" != "${EXPECTED}" ] ; then
+      #       echo -e "${RESULT}\n\ndoes not equal\n\n${EXPECTED}"
+      #       exit 1
+      #     fi
+      - name: Deploy controllers
+        run: |
+          make dev-deploy IMG=test/helm-controller:latest
+          kubectl -n helm-system rollout status deploy/source-controller --timeout=1m
+          kubectl -n helm-system rollout status deploy/helm-controller --timeout=1m
+        env:
+          KUBEBUILDER_ASSETS: ${{ github.workspace }}/kubebuilder/bin
+      # - name: Install sources
+      #   run: |
+      #     kubectl -n helm-system apply -f config/testdata/sources
+      # - name: Run smoke test
+      #   run: |
+      #     kubectl -n helm-system apply -f config/testdata/podinfo
+      #     kubectl -n helm-system wait helmreleases/podinfo --for=condition=ready --timeout=4m
+      #     kubectl -n helm-system wait helmreleases/podinfo-git --for=condition=ready --timeout=4m
+      #     kubectl -n helm-system delete -f config/testdata/podinfo
+      # - name: Run dependency tests
+      #   run: |
+      #     kubectl -n helm-system apply -f config/testdata/dependencies
+      #     kubectl -n helm-system wait helmreleases/backend --for=condition=ready --timeout=4m
+      #     kubectl -n helm-system wait helmreleases/frontend --for=condition=ready --timeout=4m
+      #     kubectl -n helm-system delete -f config/testdata/dependencies
+      # - name: Run values test
+      #   run: |
+      #     kubectl -n helm-system apply -f config/testdata/valuesfrom
+      #     kubectl -n helm-system wait helmreleases/valuesfrom --for=condition=ready --timeout=4m
+      #     RESULT=$(helm -n helm-system get values valuesfrom)
+      #     EXPECTED=$(cat config/testdata/valuesfrom/golden.txt)
+      #     if [ "$RESULT" != "$EXPECTED" ]; then
+      #       echo -e "$RESULT\n\ndoes not equal\n\n$EXPECTED"
+      #       exit 1
+      #     fi
+      #      kubectl -n helm-system delete -f config/testdata/valuesfrom
+      # - name: Run target namespace test
+      #   run: |
+      #     kubectl -n helm-system apply -f config/testdata/targetnamespace
+      #     kubectl -n helm-system wait helmreleases/targetnamespace --for=condition=ready --timeout=4m
+      #     # Confirm release in "default" namespace
+      #     kubectl -n default get deployment default-targetnamespace-podinfo
+      #     kubectl -n helm-system delete -f config/testdata/targetnamespace
+      # - name: Run install create target namespace test
+      #   run: |
+      #     kubectl -n helm-system apply -f config/testdata/install-create-target-ns
+      #     kubectl -n helm-system wait helmreleases/install-create-target-ns --for=condition=ready --timeout=4m
+      #     # Confirm release in "install-create-target-ns" namespace
+      #     kubectl -n install-create-target-ns get deployment install-create-target-ns-install-create-target-ns-podinfo
+      #     kubectl -n helm-system delete -f config/testdata/install-create-target-ns
+      # - name: Run install fail test
+      #   run: |
+      #     test_name=install-fail
+      #     kubectl -n helm-system apply -f config/testdata/$test_name
+      #     echo -n ">>> Waiting for expected conditions"
+      #     count=0
+      #     until [ 'true' == "$( kubectl -n helm-system get helmrelease/$test_name -o json | jq '.status.conditions | map( { (.type): .status } ) | add | .Released=="False" and .Ready=="False"' )" ]; do
+      #       echo -n '.'
+      #       sleep 5
+      #       count=$((count + 1))
+      #       if [[ ${count} -eq 24 ]]; then
+      #         echo ' No more retries left!'
+      #         exit 1
+      #       fi
+      #     done
+      #     echo ' done'
+      #     # Validate release was installed and not uninstalled.
+      #     REVISION_COUNT=$(helm -n helm-system history -o json $test_name | jq 'length')
+      #     if [ "$REVISION_COUNT" != 1 ]; then
+      #       echo -e "Unexpected revision count: $REVISION_COUNT"
+      #       exit 1
+      #     fi
+      #     kubectl -n helm-system delete -f config/testdata/$test_name
+      # - name: Run install test fail test
+      #   run: |
+      #     test_name=install-test-fail
+      #     kubectl -n helm-system apply -f config/testdata/$test_name
+      #     echo -n ">>> Waiting for expected conditions"
+      #     count=0
+      #     until [ 'true' == "$( kubectl -n helm-system get helmrelease/$test_name -o json | jq '.status.conditions | map( { (.type): .status } ) | add | .Released=="False" and .TestSuccess=="False" and .Ready=="False"' )" ]; do
+      #       echo -n '.'
+      #       sleep 5
+      #       count=$((count + 1))
+      #       if [[ ${count} -eq 24 ]]; then
+      #         echo ' No more retries left!'
+      #         exit 1
+      #       fi
+      #     done
+      #     echo ' done'
+      #     # Validate release was installed and not uninstalled.
+      #     REVISION_COUNT=$(helm -n helm-system history -o json $test_name | jq 'length')
+      #     if [ "$REVISION_COUNT" != 1 ]; then
+      #       echo -e "Unexpected revision count: $REVISION_COUNT"
+      #       exit 1
+      #     fi
+      #     kubectl -n helm-system delete -f config/testdata/$test_name
+      # - name: Run install test fail ignore test
+      #   run: |
+      #     test_name=install-test-fail-ignore
+      #     kubectl -n helm-system apply -f config/testdata/$test_name
+      #     echo -n ">>> Waiting for expected conditions"
+      #     count=0
+      #     until [ 'true' == "$( kubectl -n helm-system get helmrelease/$test_name -o json | jq '.status.conditions | map( { (.type): .status } ) | add | .Released=="True" and .TestSuccess=="False" and .Ready=="True"' )" ]; do
+      #       echo -n '.'
+      #       sleep 5
+      #       count=$((count + 1))
+      #       if [[ ${count} -eq 24 ]]; then
+      #         echo ' No more retries left!'
+      #         exit 1
+      #       fi
+      #     done
+      #     echo ' done'
+      #     # Validate release was installed and not uninstalled.
+      #     REVISION_COUNT=$(helm -n helm-system history -o json $test_name | jq 'length')
+      #     if [ "$REVISION_COUNT" != 1 ]; then
+      #       echo -e "Unexpected revision count: $REVISION_COUNT"
+      #       exit 1
+      #     fi
+      #     kubectl -n helm-system delete -f config/testdata/$test_name
+      # - name: Run install fail with remedition test
+      #   run: |
+      #     test_name=install-fail-remediate
+      #     kubectl -n helm-system apply -f config/testdata/$test_name
+      #     echo -n ">>> Waiting for expected conditions"
+      #     count=0
+      #     until [ 'true' == "$( kubectl -n helm-system get helmrelease/$test_name -o json | jq '.status.conditions | map( { (.type): .status } ) | add | .Released=="False" and .Ready=="False" and .Remediated=="True"' )" ]; do
+      #       echo -n '.'
+      #       sleep 5
+      #       count=$((count + 1))
+      #       if [[ ${count} -eq 24 ]]; then
+      #         echo ' No more retries left!'
+      #         exit 1
+      #       fi
+      #     done
+      #     echo ' done'
+      #     # Ensure release does not exist (was uninstalled).
+      #     HISTORY=$(helm -n helm-system history $test_name 2>&1; exit 0)
+      #     if [ "$HISTORY" != 'Error: release: not found' ]; then
+      #       echo -e "Unexpected release history: $HISTORY"
+      #       exit 1
+      #     fi
+      #     kubectl -n helm-system delete -f config/testdata/$test_name
+      # - name: Run install fail with retry test
+      #   run: |
+      #     test_name=install-fail-retry
+      #     kubectl -n helm-system apply -f config/testdata/$test_name
+      #     echo -n ">>> Waiting for expected conditions"
+      #     count=0
+      #     until [ 'true' == "$( kubectl -n helm-system get helmrelease/$test_name -o json | jq '.status.installFailures == 2 and ( .status.conditions | map( { (.type): .status } ) | add | .Released=="False" and .Ready=="False" )' )" ]; do
+      #       echo -n '.'
+      #       sleep 5
+      #       count=$((count + 1))
+      #       if [[ ${count} -eq 24 ]]; then
+      #         echo ' No more retries left!'
+      #         exit 1
+      #       fi
+      #     done
+      #     echo ' done'
+      #     # Validate release was installed.
+      #     REVISION_COUNT=$(helm -n helm-system history -o json $test_name | jq 'length')
+      #     if [ "$REVISION_COUNT" != 1 ]; then
+      #       echo -e "Unexpected revision count: $REVISION_COUNT"
+      #       exit 1
+      #     fi
+      #     kubectl -n helm-system delete -f config/testdata/$test_name
+      # - name: Run upgrade fail test
+      #   run: |
+      #     test_name=upgrade-fail
+      #     kubectl -n helm-system apply -f config/testdata/$test_name/install.yaml
+      #     echo -n ">>> Waiting for expected conditions"
+      #     count=0
+      #     until [ 'true' == "$( kubectl -n helm-system get helmrelease/$test_name -o json | jq '.status.conditions | map( { (.type): .status } ) | add | .Released=="True" and .Ready=="True"' )" ]; do
+      #       echo -n '.'
+      #       sleep 5
+      #       count=$((count + 1))
+      #       if [[ ${count} -eq 24 ]]; then
+      #         echo ' No more retries left!'
+      #         exit 1
+      #       fi
+      #     done
+      #     echo ' done'
+      #     # Validate release was installed.
+      #     REVISION_COUNT=$(helm -n helm-system history -o json $test_name | jq 'length')
+      #     if [ "$REVISION_COUNT" != 1 ]; then
+      #       echo -e "Unexpected revision count: $REVISION_COUNT"
+      #       exit 1
+      #     fi
+      #     kubectl -n helm-system apply -f config/testdata/$test_name/upgrade.yaml
+      #     echo -n ">>> Waiting for expected conditions"
+      #     count=0
+      #     until [ 'true' == "$( kubectl -n helm-system get helmrelease/$test_name -o json | jq '.status.conditions | map( { (.type): .status } ) | add | .Released=="False" and .Ready=="False"' )" ]; do
+      #       echo -n '.'
+      #       sleep 5
+      #       count=$((count + 1))
+      #       if [[ ${count} -eq 24 ]]; then
+      #         echo ' No more retries left!'
+      #         exit 1
+      #       fi
+      #     done
+      #     echo ' done'
+      #     # Validate release was upgraded and not rolled back.
+      #     REVISION_COUNT=$(helm -n helm-system history -o json $test_name | jq 'length')
+      #     if [ "$REVISION_COUNT" != 2 ]; then
+      #       echo -e "Unexpected revision count: $REVISION_COUNT"
+      #       exit 1
+      #     fi
+      #     kubectl delete -n helm-system -f config/testdata/$test_name/install.yaml
+      # - name: Run upgrade test fail test
+      #   run: |
+      #     test_name=upgrade-test-fail
+      #     kubectl -n helm-system apply -f config/testdata/$test_name/install.yaml
+      #     echo -n ">>> Waiting for expected conditions"
+      #     count=0
+      #     until [ 'true' == "$( kubectl -n helm-system get helmrelease/$test_name -o json | jq '.status.conditions | map( { (.type): .status } ) | add | .Released=="True" and .Ready=="True"' )" ]; do
+      #       echo -n '.'
+      #       sleep 5
+      #       count=$((count + 1))
+      #       if [[ ${count} -eq 24 ]]; then
+      #         echo ' No more retries left!'
+      #         exit 1
+      #       fi
+      #     done
+      #     echo ' done'
+      #     # Validate release was installed.
+      #     REVISION_COUNT=$(helm -n helm-system history -o json $test_name | jq 'length')
+      #     if [ "$REVISION_COUNT" != 1 ]; then
+      #       echo -e "Unexpected revision count: $REVISION_COUNT"
+      #       exit 1
+      #     fi
+      #     kubectl -n helm-system apply -f config/testdata/$test_name/upgrade.yaml
+      #     echo -n ">>> Waiting for expected conditions"
+      #     count=0
+      #     until [ 'true' == "$( kubectl -n helm-system get helmrelease/$test_name -o json | jq '.status.conditions | map( { (.type): .status } ) | add | .Released=="False" and .TestSuccess=="False" and .Ready=="False"' )" ]; do
+      #       echo -n '.'
+      #       sleep 5
+      #       count=$((count + 1))
+      #       if [[ ${count} -eq 24 ]]; then
+      #         echo ' No more retries left!'
+      #         exit 1
+      #       fi
+      #     done
+      #     echo ' done'
+      #     # Validate release was upgraded and not rolled back.
+      #     REVISION_COUNT=$(helm -n helm-system history -o json $test_name | jq 'length')
+      #     if [ "$REVISION_COUNT" != 2 ]; then
+      #       echo -e "Unexpected revision count: $REVISION_COUNT"
+      #       exit 1
+      #     fi
+      #     kubectl delete -n helm-system -f config/testdata/$test_name/install.yaml
+      # - name: Run upgrade fail with remediation test
+      #   run: |
+      #     test_name=upgrade-fail-remediate
+      #     kubectl -n helm-system apply -f config/testdata/$test_name/install.yaml
+      #     echo -n ">>> Waiting for expected conditions"
+      #     count=0
+      #     until [ 'true' == "$( kubectl -n helm-system get helmrelease/$test_name -o json | jq '.status.conditions | map( { (.type): .status } ) | add | .Released=="True" and .Ready=="True"' )" ]; do
+      #       echo -n '.'
+      #       sleep 5
+      #       count=$((count + 1))
+      #       if [[ ${count} -eq 24 ]]; then
+      #         echo ' No more retries left!'
+      #         exit 1
+      #       fi
+      #     done
+      #     echo ' done'
+      #     # Validate release was installed.
+      #     REVISION_COUNT=$(helm -n helm-system history -o json $test_name | jq 'length')
+      #     if [ "$REVISION_COUNT" != 1 ]; then
+      #       echo -e "Unexpected revision count: $REVISION_COUNT"
+      #       exit 1
+      #     fi
+      #     kubectl -n helm-system apply -f config/testdata/$test_name/upgrade.yaml
+      #     echo -n ">>> Waiting for expected conditions"
+      #     count=0
+      #     until [ 'true' == "$( kubectl -n helm-system get helmrelease/$test_name -o json | jq '.status.conditions | map( { (.type): .status } ) | add | .Released=="False" and .Ready=="False" and .Remediated=="True"' )" ]; do
+      #       echo -n '.'
+      #       sleep 5
+      #       count=$((count + 1))
+      #       if [[ ${count} -eq 24 ]]; then
+      #         echo ' No more retries left!'
+      #         exit 1
+      #       fi
+      #     done
+      #     echo ' done'
+      #     # Validate release was upgraded and then rolled back.
+      #     HISTORY=$(helm -n helm-system history -o json $test_name)
+      #     REVISION_COUNT=$(echo "$HISTORY" | jq 'length')
+      #     if [ "$REVISION_COUNT" != 3 ]; then
+      #       echo -e "Unexpected revision count: $REVISION_COUNT"
+      #     fi
+      #     LAST_REVISION_DESCRIPTION=$(echo "$HISTORY" | jq -r 'last | .description')
+      #     if [ "$LAST_REVISION_DESCRIPTION" != "Rollback to 1" ]; then
+      #       echo -e "Unexpected last revision description: $LAST_REVISION_DESCRIPTION"
+      #       exit 1
+      #     fi
+      #     kubectl delete -n helm-system -f config/testdata/$test_name/install.yaml
+      # - name: Run upgrade fail retry test
+      #   run: |
+      #     test_name=upgrade-fail-retry
+      #     kubectl -n helm-system apply -f config/testdata/$test_name/install.yaml
+      #     echo -n ">>> Waiting for expected conditions"
+      #     count=0
+      #     until [ 'true' == "$( kubectl -n helm-system get helmrelease/$test_name -o json | jq '.status.conditions | map( { (.type): .status } ) | add | .Released=="True" and .Ready=="True"' )" ]; do
+      #       echo -n '.'
+      #       sleep 5
+      #       count=$((count + 1))
+      #       if [[ ${count} -eq 24 ]]; then
+      #         echo ' No more retries left!'
+      #         exit 1
+      #       fi
+      #     done
+      #     echo ' done'
+      #     # Validate release was installed.
+      #     REVISION_COUNT=$(helm -n helm-system history -o json $test_name | jq 'length')
+      #     if [ "$REVISION_COUNT" != 1 ]; then
+      #       echo -e "Unexpected revision count: $REVISION_COUNT"
+      #       exit 1
+      #     fi
+      #     kubectl -n helm-system apply -f config/testdata/$test_name/upgrade.yaml
+      #     echo -n ">>> Waiting for expected conditions"
+      #     count=0
+      #     until [ 'true' == "$( kubectl -n helm-system get helmrelease/$test_name -o json | jq '.status.upgradeFailures == 2 and ( .status.conditions | map( { (.type): .status } ) | add | .Released=="False" and .Ready=="False" )' )" ]; do
+      #       echo -n '.'
+      #       sleep 5
+      #       count=$((count + 1))
+      #       if [[ ${count} -eq 24 ]]; then
+      #         echo ' No more retries left!'
+      #         exit 1
+      #       fi
+      #     done
+      #     echo ' done'
+      #     # Validate release was upgraded and rolled back twice.
+      #     HISTORY=$(helm -n helm-system history -o json $test_name)
+      #     REVISION_COUNT=$(echo "$HISTORY" | jq 'length')
+      #     if [ "$REVISION_COUNT" != 5 ]; then
+      #       echo -e "Unexpected revision count: $REVISION_COUNT"
+      #     fi
+      #     LAST_REVISION_DESCRIPTION=$(echo "$HISTORY" | jq -r 'last | .description')
+      #     if [ "$LAST_REVISION_DESCRIPTION" != "Rollback to 3" ]; then
+      #       echo -e "Unexpected last revision description: $LAST_REVISION_DESCRIPTION"
+      #       exit 1
+      #     fi
+      #     kubectl delete -n helm-system -f config/testdata/$test_name/install.yaml
+      # - name: Run upgrade fail with uninstall remediation strategy test
+      #   run: |
+      #     test_name=upgrade-fail-remediate-uninstall
+      #     kubectl -n helm-system apply -f config/testdata/$test_name/install.yaml
+      #     echo -n ">>> Waiting for expected conditions"
+      #     count=0
+      #     until [ 'true' == "$( kubectl -n helm-system get helmrelease/$test_name -o json | jq '.status.conditions | map( { (.type): .status } ) | add | .Released=="True" and .Ready=="True"' )" ]; do
+      #       echo -n '.'
+      #       sleep 5
+      #       count=$((count + 1))
+      #       if [[ ${count} -eq 24 ]]; then
+      #         echo ' No more retries left!'
+      #         exit 1
+      #       fi
+      #     done
+      #     echo ' done'
+      #     # Validate release was installed.
+      #     HISTORY=$(helm -n helm-system history -o json $test_name)
+      #     REVISION_COUNT=$(echo "$HISTORY" | jq 'length')
+      #     if [ "$REVISION_COUNT" != 1 ]; then
+      #       echo -e "Unexpected revision count: $REVISION_COUNT"
+      #       exit 1
+      #     fi
+      #     LAST_REVISION_STATUS=$(echo "$HISTORY" | jq -r 'last | .status')
+      #     if [ "$LAST_REVISION_STATUS" != "deployed" ]; then
+      #       echo -e "Unexpected last revision status: $LAST_REVISION_STATUS"
+      #       exit 1
+      #     fi
+      #     kubectl -n helm-system apply -f config/testdata/$test_name/upgrade.yaml
+      #     echo -n ">>> Waiting for expected conditions"
+      #     count=0
+      #     until [ 'true' == "$( kubectl -n helm-system get helmrelease/$test_name -o json | jq '.status.upgradeFailures == 1 and .status.installFailures == 1 and ( .status.conditions | map( { (.type): .status } ) | add | .Released=="False" and .Ready=="False" )' )" ]; do
+      #       echo -n '.'
+      #       sleep 5
+      #       count=$((count + 1))
+      #       if [[ ${count} -eq 24 ]]; then
+      #         echo ' No more retries left!'
+      #         exit 1
+      #       fi
+      #     done
+      #     echo ' done'
+      #     # Validate release was uninstalled/reinstalled.
+      #     HISTORY=$(helm -n helm-system history -o json $test_name)
+      #     REVISION_COUNT=$(echo "$HISTORY" | jq 'length')
+      #     if [ "$REVISION_COUNT" != 1 ]; then
+      #       echo -e "Unexpected revision count: $REVISION_COUNT"
+      #       exit 1
+      #     fi
+      #     LAST_REVISION_STATUS=$(echo "$HISTORY" | jq -r 'last | .status')
+      #     if [ "$LAST_REVISION_STATUS" != "failed" ]; then
+      #       echo -e "Unexpected last revision status: $LAST_REVISION_STATUS"
+      #       exit 1
+      #     fi
+      #     kubectl delete -n helm-system -f config/testdata/$test_name/install.yaml
+      # - name: Run impersonation tests
+      #   run: |
+      #     kubectl apply -f config/testdata/impersonation
+      #     kubectl -n impersonation wait helmreleases/podinfo --for=condition=ready --timeout=2m
+      #     echo -n ">>> Waiting for expected conditions"
+      #     count=0
+      #     until [ 'true' == "$( kubectl -n impersonation get helmrelease/podinfo-fail -o json | jq '.status.conditions | map( { (.type): .status } ) | add | .Released=="False" and .Ready=="False"' )" ]; do
+      #       echo -n '.'
+      #       sleep 5
+      #       count=$((count + 1))
+      #       if [[ ${count} -eq 24 ]]; then
+      #         echo ' No more retries left!'
+      #         exit 1
+      #       fi
+      #     done
+      #     echo ' done'
+      # - name: Run post-renderer-kustomize test
+      #   run: |
+      #     kubectl -n helm-system apply -f config/testdata/post-renderer-kustomize
+      #     kubectl -n helm-system wait helmreleases/post-renderer-kustomize --for=condition=ready --timeout=4m
+      #     RESULT=$(kubectl get deployment -n helm-system mypodinfo -o jsonpath='{.metadata.labels.xxxx}')
+      #     if [ "$RESULT" != "yyyy" ]; then
+      #       echo -e "$RESULT\n\ndoes not equal\n\nyyyy"
+      #       exit 1
+      #     fi
+      #     RESULT=$(kubectl get deployment -n helm-system mypodinfo -o jsonpath='{.metadata.labels.yyyy}')
+      #     if [ "$RESULT" != "xxxx" ]; then
+      #       echo -e "$RESULT\n\ndoes not equal\n\nxxxx"
+      #       exit 1
+      #     fi
+      #     kubectl -n helm-system delete -f config/testdata/post-renderer-kustomize
+      # - name: Boostrap CRDs Upgrade Tests
+      #   if: ${{ startsWith(github.ref, 'refs/tags/') || startsWith(github.ref, 'refs/heads/') }}
+      #   run: |
+      #     REF=${{ github.ref }}
+      #     if echo "$REF" | grep 'refs/tags/'; then 
+      #       TYPE=tag
+      #       REF=${REF#refs/tags/}
+      #     else
+      #       TYPE=branch
+      #       if echo "$REF" | grep 'refs/pull/'; then 
+      #         REF=${REF#refs/pull/}
+      #       else
+      #         REF=${REF#refs/heads/}
+      #       fi
+      #     fi
+      #     echo "$HEAD_REF,$CURR_REF -> $REF of type $TYPE"
+      #     echo "helm install --namespace default --set $TYPE=$REF --set url=https://github.com/${{ github.repository }} this config/testdata/charts/crds/bootstrap"
+      #     helm install --namespace default --set $TYPE=$REF --set url=https://github.com/${{ github.repository }} this config/testdata/charts/crds/bootstrap
+      #     kubectl -n default apply -f config/testdata/crds-upgrade/init
+      #     kubectl -n default wait helmreleases/crds-upgrade-test --for=condition=ready --timeout=2m
+      # - name: CRDs Upgrade Test Create
+      #   if: ${{ startsWith(github.ref, 'refs/tags/') || startsWith(github.ref, 'refs/heads/') }}
+      #   run: |
+      #     kubectl -n default apply -f config/testdata/crds-upgrade/create
+      #     kubectl -n default wait helmreleases/crds-upgrade-test --for=condition=ready --timeout=2m
+      # - name: CRDs Upgrade Test CreateReplace
+      #   if: ${{ startsWith(github.ref, 'refs/tags/') || startsWith(github.ref, 'refs/heads/') }}
+      #   run: |
+      #     kubectl -n default apply -f config/testdata/crds-upgrade/create-replace
+      #     kubectl -n default wait helmreleases/crds-upgrade-test --for=condition=ready --timeout=2m
+      # - name: Logs
+      #   run: |
+      #     kubectl -n helm-system logs deploy/source-controller
+      #     kubectl -n helm-system logs deploy/helm-controller
+      # - name: Debug failure
+      #   if: failure()
+      #   run: |
+      #     which kubectl
+      #     kubectl version
+      #     helm version
+      #     kubectl -n helm-system get helmrepositories -oyaml || true
+      #     kubectl -n helm-system get helmcharts -oyaml || true
+      #     kubectl -n helm-system get helmreleases -oyaml || true
+      #     kubectl -n helm-system get all
+      #     helm ls -n helm-system --all
+      #     kubectl -n helm-system logs deploy/source-controller || true
+      #     kubectl -n helm-system logs deploy/helm-controller || true
