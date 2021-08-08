@@ -6,4 +6,14 @@ plugins:
   scorecard.sdk.operatorframework.io/v2: {}
 projectName: redis-operator
 repo: github.com/afriedrichsen/redis-operator
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: friedrichsen.private
+  group: cache
+  kind: Redis
+  path: github.com/afriedrichsen/redis-operator/api/v1alpha1
+  version: v1alpha1
 version: "3"
